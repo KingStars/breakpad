@@ -95,7 +95,7 @@ struct CV_INFO_PDB70 {
   ULONG cv_signature;
   GUID signature;
   ULONG age;
-  UCHAR pdb_filename[ANYSIZE_ARRAY];
+  CHAR pdb_filename[ANYSIZE_ARRAY];
 };
 
 #define CV_SIGNATURE_RSDS 'SDSR'
@@ -123,8 +123,6 @@ using std::unique_ptr;
 using google_breakpad::GUIDString;
 
 bool ReadModuleInfo(const wstring & pe_file, PDBModuleInfo * info) {
-  info->debug_file = WindowsStringUtils::GetBaseName(pe_file);
-
   // Convert wchar to native charset because ImageLoad only takes
   // a PSTR as input.
   string img_file;
@@ -141,14 +139,10 @@ bool ReadModuleInfo(const wstring & pe_file, PDBModuleInfo * info) {
   }
 
   info->cpu = FileHeaderMachineToCpuString(
-    img->FileHeader->FileHeader.Machine);
+      img->FileHeader->FileHeader.Machine);
 
   PIMAGE_OPTIONAL_HEADER64 optional_header =
-    &(reinterpret_cast<PIMAGE_NT_HEADERS64>(img->FileHeader))->OptionalHeader;
-  if (optional_header->Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
-    fprintf(stderr, "Not a PE32+ image\n");
-    return false;
-  }
+      &(reinterpret_cast<PIMAGE_NT_HEADERS64>(img->FileHeader))->OptionalHeader;
 
   // Search debug directories for a guid signature & age
   DWORD debug_rva = optional_header->
@@ -164,21 +158,37 @@ bool ReadModuleInfo(const wstring & pe_file, PDBModuleInfo * info) {
 
   for (DWORD i = 0; i < debug_size / sizeof(*debug_directories); i++) {
     if (debug_directories[i].Type != IMAGE_DEBUG_TYPE_CODEVIEW ||
-      debug_directories[i].SizeOfData < sizeof(CV_INFO_PDB70)) {
+        debug_directories[i].SizeOfData < sizeof(CV_INFO_PDB70)) {
       continue;
     }
 
     struct CV_INFO_PDB70* cv_info = static_cast<CV_INFO_PDB70*>(ImageRvaToVa(
-      img->FileHeader,
-      img->MappedAddress,
-      debug_directories[i].AddressOfRawData,
-      &img->LastRvaSection));
+        img->FileHeader,
+        img->MappedAddress,
+        debug_directories[i].AddressOfRawData,
+        &img->LastRvaSection));
     if (cv_info->cv_signature != CV_SIGNATURE_RSDS) {
       continue;
     }
 
     info->debug_identifier = GenerateDebugIdentifier(cv_info->age,
         cv_info->signature);
+
+    // This code assumes that the pdb_filename is stored as ASCII without
+    // multibyte characters, but it's not clear if that's true.
+    size_t debug_file_length = strnlen_s(cv_info->pdb_filename, MAX_PATH);
+    if (debug_file_length < 0 || debug_file_length >= MAX_PATH) {
+      fprintf(stderr, "PE debug directory is corrupt.\n");
+      return false;
+    }
+    std::string debug_file(cv_info->pdb_filename, debug_file_length);
+    if (!WindowsStringUtils::safe_mbstowcs(debug_file, &info->debug_file)) {
+      fprintf(stderr, "PDB filename '%s' contains unrecognized characters.\n",
+          debug_file.c_str());
+      return false;
+    }
+    info->debug_file = WindowsStringUtils::GetBaseName(info->debug_file);
+
     return true;
   }
 
@@ -275,7 +285,7 @@ bool PrintPEFrameData(const wstring & pe_file, FILE * out_file)
       unwind_rva = chained_func->UnwindInfoAddress;
     }
 
-    UnwindInfo *unwind_info = static_cast<UnwindInfo *>(
+    UnwindInfo *unwind_info = static_cast<UnwindInfo*>(
       ImageRvaToVa(img->FileHeader,
         img->MappedAddress,
         unwind_rva,
@@ -341,7 +351,7 @@ bool PrintPEFrameData(const wstring & pe_file, FILE * out_file)
           (unwind_info->unwind_code +
             ((unwind_info->count_of_codes + 1) & ~1)));
 
-        unwind_info = static_cast<UnwindInfo *>(
+        unwind_info = static_cast<UnwindInfo*>(
           ImageRvaToVa(img->FileHeader,
             img->MappedAddress,
             chained_func->UnwindInfoAddress,
@@ -392,27 +402,6 @@ wstring GenerateDebugIdentifier(DWORD age, DWORD signature)
     sizeof(identifier_string[0]) - 1] = L'\0';
 
   return wstring(identifier_string);
-}
-
-constexpr const wchar_t* FileHeaderMachineToCpuString(WORD machine)
-{
-  {
-    switch (machine) {
-      case IMAGE_FILE_MACHINE_I386:
-      {
-        return L"x86";
-      }
-      case IMAGE_FILE_MACHINE_IA64:
-      case IMAGE_FILE_MACHINE_AMD64:
-      {
-        return L"x86_64";
-      }
-      default:
-      {
-        return L"unknown";
-      }
-    }
-  }
 }
 
 }  // namespace google_breakpad
